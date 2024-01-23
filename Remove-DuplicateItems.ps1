@@ -5,11 +5,14 @@
     Michel de Rooij
     michel@eightwone.com
 
+    Modified by Michael Lubert
+    https://github.com/Adanufgail
+
     THIS CODE IS MADE AVAILABLE AS IS, WITHOUT WARRANTY OF ANY KIND. THE
     ENTIRE RISK OF THE USE OR THE RESULTS FROM THE USE OF THIS CODE REMAINS
     WITH THE USER.
 
-    Version 2.44, August 7th, 2023
+    Version 2.44-META, August 7th, 2024
 
     .DESCRIPTION
     This script will scan each folder of a given primary mailbox and personal archive (when
@@ -121,6 +124,7 @@
             Changed Contact property set to compare so we can use FindItem
     2.43    Fixed typo causing error forn mon-standard items
     2.44    Changed OAuth to use dummy creds to prevent 'Credentials are required to make a service request' issue
+    2.44-META Added in Metalogix Stub-specific functions.
 
     .PARAMETER Identity
     Identity of the Mailbox. Can be CN/SAMAccountName (for on-premises) or e-mail format (on-prem & Office 365)
@@ -524,7 +528,7 @@ param(
     [parameter( Mandatory= $false, ParameterSetName= 'OAuthCertFilePublicFolders')] 
     [parameter( Mandatory= $false, ParameterSetName= 'OAuthCertSecretPublicFolders')] 
     [parameter( Mandatory= $false, ParameterSetName= 'BasicAuthPublicFolders')] 
-    [ValidateSet( 'Quick', 'Full', 'Body')]
+    [ValidateSet( 'Quick', 'Full', 'Body','Stubs')]
     [string]$Mode= 'Quick',
     [parameter( Mandatory= $false, ParameterSetName= 'DefaultAuthMailboxOnly')] 
     [parameter( Mandatory= $true, ParameterSetName= 'OAuthCertThumbMailboxOnly')] 
@@ -882,7 +886,7 @@ begin {
             [switch]$Disable
         )
 
-        Add-Type -TypeDefinition  @"
+        Add-Type -TypeDefinition @"
             using System.Net.Security;
             using System.Security.Cryptography.X509Certificates;
             public static class TrustEverything
@@ -891,7 +895,7 @@ begin {
                     SslPolicyErrors sslPolicyErrors) { return true; }
                 public static void SetCallback() { System.Net.ServicePointManager.ServerCertificateValidationCallback= ValidationCallback; }
                 public static void UnsetCallback() { System.Net.ServicePointManager.ServerCertificateValidationCallback= null; }
-        }
+            }
 "@
         If($Enable) {
             Write-Verbose ('Enabling SSL certificate verification')
@@ -1321,11 +1325,17 @@ begin {
                 }
                 $ItemView= New-Object Microsoft.Exchange.WebServices.Data.ItemView( $MaxItemBatchSize, 0, [Microsoft.Exchange.WebServices.Data.OffsetBasePoint]::Beginning)
                 $ItemView.Traversal= [Microsoft.Exchange.WebServices.Data.ItemTraversal]::Shallow
-                If ( $Retain -eq 'Oldest') {
-                    $ItemView.OrderBy.Add( [Microsoft.Exchange.WebServices.Data.ItemSchema]::LastModifiedTime, [Microsoft.Exchange.WebServices.Data.SortDirection]::Ascending)
+                If($Mode -eq "Stubs"){
+                    Write-Host ('Sorting by ItemClass')
+                    $ItemView.OrderBy.Add( [Microsoft.Exchange.WebServices.Data.ItemSchema]::ItemClass, [Microsoft.Exchange.WebServices.Data.SortDirection]::Ascending)
                 }
-                Else {
-                    $ItemView.OrderBy.Add( [Microsoft.Exchange.WebServices.Data.ItemSchema]::LastModifiedTime, [Microsoft.Exchange.WebServices.Data.SortDirection]::Descending)
+                else {
+                    If ( $Retain -eq 'Oldest') {
+                        $ItemView.OrderBy.Add( [Microsoft.Exchange.WebServices.Data.ItemSchema]::LastModifiedTime, [Microsoft.Exchange.WebServices.Data.SortDirection]::Ascending)
+                    }
+                    Else {
+                        $ItemView.OrderBy.Add( [Microsoft.Exchange.WebServices.Data.ItemSchema]::LastModifiedTime, [Microsoft.Exchange.WebServices.Data.SortDirection]::Descending)
+                    }
                 }
                 $ItemPropset= [System.Collections.ArrayList]@(
                      [Microsoft.Exchange.WebServices.Data.ItemSchema]::ItemClass,
@@ -1348,7 +1358,7 @@ begin {
                      [Microsoft.Exchange.WebServices.Data.TaskSchema]::StartDate,
                      [Microsoft.Exchange.WebServices.Data.TaskSchema]::DueDate,
                      [Microsoft.Exchange.WebServices.Data.TaskSchema]::Status
-                )
+                    )
                 # Only retrieve these attributes when we when in relevant operating mode:
                 If(! $NoSize) {
                     $ItemPropset.Add( [Microsoft.Exchange.WebServices.Data.ItemSchema]::Size)
@@ -1380,22 +1390,25 @@ begin {
                     }
                     If ( $ItemSearchResults.Items.Count -gt 0) {
 
-#                        # Already loaded during FindItem operation by specifying ItemView
-#                        If( $ThisMailboxMode -ne 'Quick') {
-#                            # Fetch properties for found items to conduct matching
-#                            $EwsService.LoadPropertiesForItems( $ItemSearchResults.Items, $ItemView.PropertySet)  
-#                        }
+                        ## Already loaded during FindItem operation by specifying ItemView
+                        #If( $ThisMailboxMode -ne 'Quick') {
+                        #    # Fetch properties for found items to conduct matching
+                        #    $EwsService.LoadPropertiesForItems( $ItemSearchResults.Items, $ItemView.PropertySet)  
+                        #}
 
                         ForEach ( $Item in $ItemSearchResults.Items) {
 
                             Write-Debug ('Inspecting item {0} of {1}, modified {2}' -f $Item.Subject, $Item.DateTimeReceived, $Item.LastModifiedTime)
                             $TotalFolder++
                             $TotalMatch++
-                            If( $ThisMailboxMode -eq 'Body') {
+                            If( $ThisMailboxMode -eq 'Stubs') {
+                                $keyElem= [System.Collections.ArrayList]@( $Item.InternetMessageId)
+                            }
+                            ElseIf( $ThisMailboxMode -eq 'Body') {
                                 # Use PR_MESSAGE_BODY for matching duplicates
                                 $keyElem= [System.Collections.ArrayList]@( $Item.Body)
                             }
-                            If( $ThisMailboxMode -eq 'Quick') {
+                            ElseIf( $ThisMailboxMode -eq 'Quick') {
                                 # Use PidTagSearchKey for matching duplicates
                                 $PropVal= $null
                                 if ( $Item.TryGetProperty( $PidTagSearchKey, [ref]$PropVal)) {
@@ -1411,7 +1424,6 @@ begin {
                                 $keyElem= [System.Collections.ArrayList]@( $Item.ItemClass)
                                 if ($Item.Subject) { [void]$keyElem.Add($Item.Subject)}
                                 If (!$NoSize) {if ($Item.Size) { [void]$keyElem.Add( $Item.Size.ToString())}}
-
                                 switch ($Item.ItemClass) {
                                     'IPM.Note' {
                                         if ($Item.DateTimeReceived) { [void]$keyElem.Add( $Item.DateTimeReceived.ToString())}
@@ -1454,15 +1466,25 @@ begin {
                                 $hash= Get-Hash $key
                                 If ( $global:UniqueList.contains( $hash)) {
                                     If ( $Report.IsPresent) {
-                                        Write-Host ('Item: {0} of {1} ({2})' -f $Item.Subject, $Item.DateTimeReceived, $Item.ItemClass)
+                                        Write-Host ('DUPL Item: {0} of {1} {2}' -f $Item.Subject, $Item.DateTimeReceived, $Item.ItemClass)
                                     }
                                     Write-Debug ('Duplicate:{0} (key={1})' -f $hash, $key)
                                     $DuplicateList.Add( $Item.Id) | Out-Null
                                     $TotalDuplicates++
                                 }
                                 Else {
-                                    Write-Debug ('Unique:{0}, hash={1} (key={2})' -f $Item.Id, $hash, $key)
-                                    $global:UniqueList.Add( $hash) | Out-Null
+                                    if($Item.ItemClass -eq "IPM.Note.PamMessage")
+                                    {
+                                        If ( $Report.IsPresent) {
+                                            Write-Host ('STUB Item: {0} of {1} {2}' -f $Item.Subject, $Item.DateTimeReceived, $Item.ItemClass)
+                                        }
+                                    }
+                                    Else
+                                    {
+                                        Write-Host ('UNIQ Item: {0} of {1} {2}' -f $Item.Subject, $Item.DateTimeReceived, $Item.ItemClass)
+                                        Write-Debug ('Unique:{0}, hash={1} (key={2})' -f $Item.Id, $hash, $key)
+                                        $global:UniqueList.Add( $hash) | Out-Null
+                                    }
                                 }
                             }
                             Else {
@@ -1555,7 +1577,8 @@ begin {
         }
         Return $ProcessingOK
     }
-
+    #import-module exchangeonlinemanagement
+    #import-module msonline
     Import-ModuleDLL -Name 'Microsoft.Exchange.WebServices' -FileName 'Microsoft.Exchange.WebServices.dll' -Package 'Exchange.WebServices.Managed.Api'
     Import-ModuleDLL -Name 'Microsoft.Identity.Client' -FileName 'Microsoft.Identity.Client.dll' -Package 'Microsoft.Identity.Client'
 
