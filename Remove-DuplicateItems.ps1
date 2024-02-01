@@ -5,11 +5,15 @@
     Michel de Rooij
     michel@eightwone.com
 
+    Modified by Michael Lubert
+    https://github.com/Adanufgail
+
     THIS CODE IS MADE AVAILABLE AS IS, WITHOUT WARRANTY OF ANY KIND. THE
     ENTIRE RISK OF THE USE OR THE RESULTS FROM THE USE OF THIS CODE REMAINS
     WITH THE USER.
 
-    Version 2.44, August 7th, 2023
+    Version 2.44-META-0.2, February 1, 2024
+    Based on version 2.44, August 7th, 2023
 
     .DESCRIPTION
     This script will scan each folder of a given primary mailbox and personal archive (when
@@ -121,6 +125,8 @@
             Changed Contact property set to compare so we can use FindItem
     2.43    Fixed typo causing error forn mon-standard items
     2.44    Changed OAuth to use dummy creds to prevent 'Credentials are required to make a service request' issue
+    2.44-META-0.1  Added Metalogix Features
+    2.44-META-0.2  Added token refresh
 
     .PARAMETER Identity
     Identity of the Mailbox. Can be CN/SAMAccountName (for on-premises) or e-mail format (on-prem & Office 365)
@@ -179,6 +185,7 @@
                 DateTimeReceived, Sender, Size
               - Other: Subject, DateTimeReceived, Size
     - Body:   Removes duplicate items with matching Body attribute.
+    - Stubs:  Removes Metalogix stubs which are duplicates. Uses just the InternetMessageID. Will not remove stubs that are not duplicates.
 
     When NoSize is used in Full mode, Size is not used as criteria.
 
