@@ -5,14 +5,11 @@
     Michel de Rooij
     michel@eightwone.com
 
-    Modified by Michael Lubert
-    https://github.com/Adanufgail
-
     THIS CODE IS MADE AVAILABLE AS IS, WITHOUT WARRANTY OF ANY KIND. THE
     ENTIRE RISK OF THE USE OR THE RESULTS FROM THE USE OF THIS CODE REMAINS
     WITH THE USER.
 
-    Version 2.44-META, August 7th, 2024
+    Version 2.44, August 7th, 2023
 
     .DESCRIPTION
     This script will scan each folder of a given primary mailbox and personal archive (when
@@ -124,7 +121,6 @@
             Changed Contact property set to compare so we can use FindItem
     2.43    Fixed typo causing error forn mon-standard items
     2.44    Changed OAuth to use dummy creds to prevent 'Credentials are required to make a service request' issue
-    2.44-META Added in Metalogix Stub-specific functions.
 
     .PARAMETER Identity
     Identity of the Mailbox. Can be CN/SAMAccountName (for on-premises) or e-mail format (on-prem & Office 365)
@@ -799,7 +795,7 @@ param(
 begin {
 
     # Process folders these batches
-    $MaxFolderBatchSize= 100
+    $MaxFolderBatchSize= 10
     # Process items in these page sizes
     $MaxItemBatchSize= 100
     # Max of concurrent item deletes
@@ -807,9 +803,10 @@ begin {
 
     # Initial sleep timer (ms) and treshold before lowering
     $script:SleepTimerMax= 300000               # Maximum delay (5min)
-    $script:SleepTimerMin= 100                  # Minimum delay
+    $script:SleepTimerMin= 10000                  # Minimum delay
     $script:SleepAdjustmentFactor= 2.0          # When tuning, use this factor
     $script:SleepTimer= $script:SleepTimerMin   # Initial sleep timer value
+    $global:TokenRefreshCountdown=10
 
     # Error codes
     $ERR_DLLNOTFOUND= 1000
@@ -1226,7 +1223,7 @@ begin {
             }
             
             ForEach ( $FolderItem in $FolderSearchResults) {
-
+                Refresh-Token
                 $FolderPath= '{0}\{1}' -f $CurrentPath, $FolderItem.DisplayName
                 If ( $IncludeFilter) {
                     $Add= $false
@@ -1296,6 +1293,7 @@ begin {
         $ThisMailboxMode= $Mode
         $TotalMatch= 0
         $TotalRemoved= 0
+        $TotalDupes= 0
         $FoldersFound= 0
         $FoldersProcessed= 0
         $TimeProcessingStart= Get-Date
@@ -1312,7 +1310,7 @@ begin {
         $FoldersToProcess= $FoldersToProcess | Sort-Object Priority -Descending
 
         ForEach ( $SubFolder in $FoldersToProcess) {
-
+            Refresh-Token
             If (!$NoProgressBar) {
                 Write-Progress -Id 1 -Activity ('Processing {0} ({1})' -f $emailAddress, $Desc) -Status ('Processed folder {0} of {1}' -f $FoldersProcessed, $FoldersFound) -PercentComplete ( $FoldersProcessed / $FoldersFound * 100)
             }
@@ -1466,7 +1464,7 @@ begin {
                                 $hash= Get-Hash $key
                                 If ( $global:UniqueList.contains( $hash)) {
                                     If ( $Report.IsPresent) {
-                                        Write-Host ('DUPL Item: {0} of {1} {2}' -f $Item.Subject, $Item.DateTimeReceived, $Item.ItemClass)
+                                        Write-Host ('DUPL Item: {0}; {1} {2} {3}' -f $Item.Subject, $Item.InternetMessageId,$Item.DateTimeReceived, $Item.ItemClass)
                                     }
                                     Write-Debug ('Duplicate:{0} (key={1})' -f $hash, $key)
                                     $DuplicateList.Add( $Item.Id) | Out-Null
@@ -1497,6 +1495,7 @@ begin {
                         # No items found
 
                     }
+                $TotalDupes += $TotalDuplicates
                 } While ( $ItemSearchResults.MoreAvailable -and $ProcessingOK)
             }
             Else {
@@ -1573,7 +1572,7 @@ begin {
         If ( $ProcessingOK) {
             $TimeProcessingDiff= (Get-Date) - $TimeProcessingStart
             $Speed= [int]( $TotalMatch / $TimeProcessingDiff.TotalSeconds * 60)
-            Write-Host ('{0} items processed and {1} removed in {2:hh}:{2:mm}:{2:ss} - average {3} items/min' -f $TotalMatch, $TotalRemoved, $TimeProcessingDiff, $Speed)
+            Write-Host ('{0} items processed and {1}/{2} removed in {3:hh}:{3:mm}:{3:ss} - average {4} items/min' -f $TotalMatch, $TotalDupes, $TotalRemoved, $TimeProcessingDiff, $Speed)
         }
         Return $ProcessingOK
     }
@@ -1594,92 +1593,106 @@ begin {
     Catch {
         Throw( 'Problem initializing Exchange Web Services using schema {0} and TimeZone {1}' -f $ExchangeSchema, $TZ.Id)
     }
-
-    If( $Credentials -or $UseDefaultCredentials) {
-        If( $Credentials) {
-            try {
-                Write-Verbose ('Using credentials {0}' -f $Credentials.UserName)
-                $EwsService.Credentials= [System.Net.NetworkCredential]::new( $Credentials.UserName, [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR( $Credentials.Password )))
-            }
-            catch {
-                Write-Error ('Invalid credentials provided: {0}' -f $_.Exception.Message)
-                Exit $ERR_INVALIDCREDENTIALS
-            }
-        }
-        Else {
-            Write-Verbose ('Using Default Credentials')
-            $EwsService.UseDefaultCredentials = $true
-        }
-    }
-    Else {
-
-        # Use OAuth (and impersonation/X-AnchorMailbox always set)
-        $Impersonation= $true
-
-        # Dummy creds to prevent "Credentials are required to make a service request" issue
-        $EwsService.Credentials= [System.Net.NetworkCredential]::new( '', ( ConvertTo-SecureString -String 'dummy' -AsPlainText -Force))
-
-        If( $CertificateThumbprint -or $CertificateFile) {
-            If( $CertificateFile) {
-                
-                # Use certificate from file using absolute path to authenticate
-                $CertificateFile= (Resolve-Path -Path $CertificateFile).Path
-                
-                Try {
-                    If( $CertificatePassword) {
-                        $X509Certificate2= [System.Security.Cryptography.X509Certificates.X509Certificate2]::new( $CertificateFile, [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR( $CertificatePassword)))
-                    }
-                    Else {
-                        $X509Certificate2= [System.Security.Cryptography.X509Certificates.X509Certificate2]::new( $CertificateFile)
-                    }
+    Function Get-Token
+    {
+        If( $Credentials -or $UseDefaultCredentials) {
+            If( $Credentials) {
+                try {
+                    Write-Verbose ('Using credentials {0}' -f $Credentials.UserName)
+                    $EwsService.Credentials= [System.Net.NetworkCredential]::new( $Credentials.UserName, [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR( $Credentials.Password )))
                 }
-                Catch {
-                    Write-Error ('Problem importing PFX: {0}' -f $_.Exception.Message)
-                    Exit $ERR_PROBLEMIMPORTINGCERT
+                catch {
+                    Write-Error ('Invalid credentials provided: {0}' -f $_.Exception.Message)
+                    Exit $ERR_INVALIDCREDENTIALS
                 }
             }
             Else {
-                # Use provided certificateThumbprint to retrieve certificate from My store, and authenticate with that
-                $CertStore= [System.Security.Cryptography.X509Certificates.X509Store]::new( [Security.Cryptography.X509Certificates.StoreName]::My, [Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser)
-                $CertStore.Open( [System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly )
-                $X509Certificate2= $CertStore.Certificates.Find( [System.Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint, $CertificateThumbprint, $False) | Select-Object -First 1
-                If(!( $X509Certificate2)) {
-                    Write-Error ('Problem locating certificate in My store: {0}' -f $error[0])
-                    Exit $ERR_CERTNOTFOUND
-                }
+                Write-Verbose ('Using Default Credentials')
+                $EwsService.UseDefaultCredentials = $true
             }
-            Write-Verbose ('Will use certificate {0}, issued by {1} and expiring {2}' -f $X509Certificate2.Thumbprint, $X509Certificate2.Issuer, $X509Certificate2.NotAfter)
-            $App= [Microsoft.Identity.Client.ConfidentialClientApplicationBuilder]::Create( $ClientId).WithCertificate( $X509Certificate2).withTenantId( $TenantId).Build()
-               
         }
         Else {
-            # Use provided secret to authenticate
-            Write-Verbose ('Will use provided secret to authenticate')
-            $PlainSecret= [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR( $Secret))
-            $App= [Microsoft.Identity.Client.ConfidentialClientApplicationBuilder]::Create( $ClientId).WithClientSecret( $PlainSecret).withTenantId( $TenantId).Build()
+            # Use OAuth (and impersonation/X-AnchorMailbox always set)
+            $global:Impersonation= $true
+
+            # Dummy creds to prevent "Credentials are required to make a service request" issue
+            $EwsService.Credentials= [System.Net.NetworkCredential]::new( '', ( ConvertTo-SecureString -String 'dummy' -AsPlainText -Force))
+
+            If( $CertificateThumbprint -or $CertificateFile) {
+                If( $CertificateFile) {
+                    
+                    # Use certificate from file using absolute path to authenticate
+                    $CertificateFile= (Resolve-Path -Path $CertificateFile).Path
+                    
+                    Try {
+                        If( $CertificatePassword) {
+                            $X509Certificate2= [System.Security.Cryptography.X509Certificates.X509Certificate2]::new( $CertificateFile, [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR( $CertificatePassword)))
+                        }
+                        Else {
+                            $X509Certificate2= [System.Security.Cryptography.X509Certificates.X509Certificate2]::new( $CertificateFile)
+                        }
+                    }
+                    Catch {
+                        Write-Error ('Problem importing PFX: {0}' -f $_.Exception.Message)
+                        Exit $ERR_PROBLEMIMPORTINGCERT
+                    }
+                }
+                Else {
+                    # Use provided certificateThumbprint to retrieve certificate from My store, and authenticate with that
+                    $CertStore= [System.Security.Cryptography.X509Certificates.X509Store]::new( [Security.Cryptography.X509Certificates.StoreName]::My, [Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser)
+                    $CertStore.Open( [System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly )
+                    $X509Certificate2= $CertStore.Certificates.Find( [System.Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint, $CertificateThumbprint, $False) | Select-Object -First 1
+                    If(!( $X509Certificate2)) {
+                        Write-Error ('Problem locating certificate in My store: {0}' -f $error[0])
+                        Exit $ERR_CERTNOTFOUND
+                    }
+                }
+                Write-Verbose ('Will use certificate {0}, issued by {1} and expiring {2}' -f $X509Certificate2.Thumbprint, $X509Certificate2.Issuer, $X509Certificate2.NotAfter)
+                $App= [Microsoft.Identity.Client.ConfidentialClientApplicationBuilder]::Create( $ClientId).WithCertificate( $X509Certificate2).withTenantId( $TenantId).Build()
+                   
+            }
+            Else {
+                # Use provided secret to authenticate
+                Write-Verbose ('Will use provided secret to authenticate')
+                $PlainSecret= [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR( $Secret))
+                $App= [Microsoft.Identity.Client.ConfidentialClientApplicationBuilder]::Create( $ClientId).WithClientSecret( $PlainSecret).withTenantId( $TenantId).Build()
+            }
+            $Scopes= New-Object System.Collections.Generic.List[string]
+            $Scopes.Add( 'https://outlook.office365.com/.default')
+            Try {
+                $Response=$App.AcquireTokenForClient( $Scopes).executeAsync()
+                $Token= $Response.Result
+                $EwsService.Credentials= [Microsoft.Exchange.WebServices.Data.OAuthCredentials]$Token.AccessToken
+                Write-Verbose ('Authentication token acquired')
+            }
+            Catch {
+                Write-Error ('Problem acquiring token: {0}' -f $error[0])
+                Exit $ERR_INVALIDCREDENTIALS
+            }
         }
-        $Scopes= New-Object System.Collections.Generic.List[string]
-        $Scopes.Add( 'https://outlook.office365.com/.default')
-        Try {
-            $Response=$App.AcquireTokenForClient( $Scopes).executeAsync()
-            $Token= $Response.Result
-            $EwsService.Credentials= [Microsoft.Exchange.WebServices.Data.OAuthCredentials]$Token.AccessToken
-            Write-Verbose ('Authentication token acquired')
-        }
-        Catch {
-            Write-Error ('Problem acquiring token: {0}' -f $error[0])
-            Exit $ERR_INVALIDCREDENTIALS
+        $EwsService.EnableScpLookup= if( $NoSCP) { $false } else { $true }
+        Write-Verbose ('Cleanup Mode: {0}' -f $CleanupMode)
+
+        If( $TrustAll) {
+            Set-SSLVerification -Disable
         }
     }
-    $EwsService.EnableScpLookup= if( $NoSCP) { $false } else { $true }
-    Write-Verbose ('Cleanup Mode: {0}' -f $CleanupMode)
-
-    If( $TrustAll) {
-        Set-SSLVerification -Disable
+    Function Refresh-Token
+    {
+        Write-Verbose ('Refreshing Token After {0} more uses' -f $global:TokenRefreshCountdown)
+        if($global:TokenRefreshCountdown -gt 0)
+        {
+            $global:TokenRefreshCountdown--;
+        }
+        else
+        {
+            Get-Token;
+            $global:TokenRefreshCountdown=11
+        }
     }
 }
 Process {
-
+    Get-Token
     ForEach ( $CurrentIdentity in $Identity) {
 
         $EmailAddress= get-EmailAddress -Identity $CurrentIdentity
@@ -1695,7 +1708,7 @@ Process {
             Write-Host ('Processing mailbox {0} ({1})' -f $EmailAddress, $CurrentIdentity)
         }
 
-        If( $Impersonation) {
+        If( $global:Impersonation) {
             Write-Verbose ('Using {0} for impersonation' -f $EmailAddress)
             $EwsService.ImpersonatedUserId= [Microsoft.Exchange.WebServices.Data.ImpersonatedUserId]::new( [Microsoft.Exchange.WebServices.Data.ConnectingIdType]::SmtpAddress, $EmailAddress)
             $EwsService.HttpHeaders.Clear()
