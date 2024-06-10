@@ -12,7 +12,7 @@
     ENTIRE RISK OF THE USE OR THE RESULTS FROM THE USE OF THIS CODE REMAINS
     WITH THE USER.
 
-    Version 2.44-META-0.3, February 1, 2024
+    Version 2.44-META-0.4, June 10, 2024
     Based on version 2.44, August 7th, 2023
 
     .DESCRIPTION
@@ -128,6 +128,7 @@
     2.44-META-0.1  Added Metalogix Features
     2.44-META-0.2  Added token refresh
     2.44-META-0.3  Changed token refresh into a variable so it can be easily tweaked.
+    2.44-META-0.4  Added countdown timer to sleep so that it doesn't just look like it's freezing. Updated refresh countdown to 20 from 10.
 
     .PARAMETER Identity
     Identity of the Mailbox. Can be CN/SAMAccountName (for on-premises) or e-mail format (on-prem & Office 365)
@@ -811,11 +812,11 @@ begin {
 
     # Initial sleep timer (ms) and treshold before lowering
     $script:SleepTimerMax= 300000               # Maximum delay (5min)
-    $script:SleepTimerMin= 10000                  # Minimum delay
+    $script:SleepTimerMin= 10000                # Minimum delay
     $script:SleepAdjustmentFactor= 2.0          # When tuning, use this factor
     $script:SleepTimer= $script:SleepTimerMin   # Initial sleep timer value
-    $global:TokenRefreshCountdown=10            # Initial Token Countdown
-    $global:TokenRefreshReset=10                # Token is reset to this value
+    $global:TokenRefreshCountdown=20            # Initial Token Countdown
+    $global:TokenRefreshReset=20                # Token is reset to this value
 
     # Error codes
     $ERR_DLLNOTFOUND= 1000
@@ -1008,7 +1009,14 @@ begin {
             }
             Write-Warning ('Previous EWS operation failed, adjusted sleep timer to {0}ms' -f $script:SleepTimer)
         }
-        Start-Sleep -Milliseconds $script:SleepTimer
+        $countdown=$script:SleepTimer
+        while($countdown -gt 0)
+        {
+            $secleft=$countdown/1000
+            Write-Progress -Id 3 -Activity 'Sleeping' -Status ('Sleeping for {0} seconds' -f $secleft)
+            if($countdown -gt 1000){Start-Sleep -Seconds 1;$countdown=$countdown-1000}
+            else{Start-Sleep -Milliseconds $countdown; $countdown=0}
+        }
     }
 
     Function myEWSFind-Folders {
@@ -1800,7 +1808,9 @@ Process {
                     }
                 }
                 catch {
-                    Write-Debug 'No archive configured or cannot access archive'
+                    $Err='No archive configured or cannot access archive'
+                    Write-Verbose $Err
+                    Write-Debug $Err
                 }
                 Write-Verbose ('Processing {0} finished' -f $EmailAddress)
             }
